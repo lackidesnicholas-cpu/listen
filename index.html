@@ -983,6 +983,7 @@ function restoreLast() {
   current = last;
   heard = false;
   showNow();
+  setSession();
   player.cueVideoById({ videoId: last.id, startSeconds: resumeAt(last.id) });
 }
 let queue = [], qi = -1, current = null, tapTimer = null, dragging = false;
@@ -1005,12 +1006,14 @@ window.onYouTubeIframeAPIReady = () => {
       onStateChange: e => {
         if (e.data === 1) {
           heard = true;
+          nowPlaying(true);
           setNeedTap(false);
           $('#toggle').textContent = 'Pause';
           player.setPlaybackRate(SPEEDS[speedIndex]);
         } else if (e.data === 2) {
           $('#toggle').textContent = 'Play';
           savePos();
+          nowPlaying(false);
         } else if (e.data === 0) {
           $('#toggle').textContent = 'Play';
           savePos();
@@ -1045,7 +1048,10 @@ function start() {
   savePos();
   current = queue[qi];
   heard = false;
+  wantPlaying = true;
+  keepAwake();
   showNow();
+  setSession();
   store.set('last', { id: current.id, title: current.title, by: current.by || '', channel: current.by || current.channel || '' });
 
   const recent = store.get('recent', []).filter(t => t.id !== current.id);
@@ -1059,8 +1065,8 @@ function start() {
 
 $('#toggle').onclick = () => {
   if (!playerReady || !current) return;
-  if (player.getPlayerState() === 1) player.pauseVideo();
-  else { player.playVideo(); if (!heard) watchStart(); }
+  if (player.getPlayerState() === 1) { wantPlaying = false; player.pauseVideo(); }
+  else { wantPlaying = true; keepAwake(); player.playVideo(); if (!heard) watchStart(); }
 };
 $('#prev').onclick = () => step(-1);
 $('#next').onclick = () => step(1);
@@ -1089,6 +1095,68 @@ setInterval(() => {
   }
   $('#t-dur').textContent = d ? fmt(d) : '';
 }, 500);
+
+/* ---------- Screen-off attempt ---------- */
+/* iPhone pauses the hidden player when the screen locks. Three things push back:
+   a silent looping sound keeps this page awake, the lock screen buttons are wired
+   to the player, and a pause that happens while the page is hidden is undone.
+   The phone has the final say, so this may not hold on every iOS version. */
+let wantPlaying = false, hideKicks = 0, idleTimer = null;
+
+const silence = (() => {
+  const n = 8000, b = new Uint8Array(44 + n), v = new DataView(b.buffer);
+  const put = (o, t) => { for (let i = 0; i < t.length; i++) b[o + i] = t.charCodeAt(i); };
+  put(0, 'RIFF'); v.setUint32(4, 36 + n, true); put(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 8000, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true); put(36, 'data'); v.setUint32(40, n, true);
+  b.fill(128, 44);
+  const a = new Audio(URL.createObjectURL(new Blob([b], { type: 'audio/wav' })));
+  a.loop = true;
+  return a;
+})();
+
+function keepAwake() {
+  clearTimeout(idleTimer);
+  const p = silence.play();
+  if (p && p.catch) p.catch(() => {});
+}
+
+function setSession() {
+  if (!('mediaSession' in navigator) || !window.MediaMetadata || !current) return;
+  const meta = { title: current.title, artist: current.by || current.channel || '' };
+  if (store.get('thumbs', true)) {
+    meta.artwork = [{ src: 'https://i.ytimg.com/vi/' + encodeURIComponent(current.id) + '/mqdefault.jpg', sizes: '320x180', type: 'image/jpeg' }];
+  }
+  navigator.mediaSession.metadata = new MediaMetadata(meta);
+}
+
+function nowPlaying(on) {
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = on ? 'playing' : 'paused';
+  clearTimeout(idleTimer);
+  if (on) return;
+  if (wantPlaying && document.hidden && hideKicks < 3) {
+    hideKicks++;
+    setTimeout(() => { if (wantPlaying && playerReady) player.playVideo(); }, 400);
+  } else if (!wantPlaying) {
+    /* Stop holding the phone's audio ten minutes after a deliberate pause. */
+    idleTimer = setTimeout(() => silence.pause(), 10 * 60 * 1000);
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  hideKicks = 0;
+  if (!document.hidden && wantPlaying && playerReady && current && player.getPlayerState() === 2) player.playVideo();
+});
+
+if ('mediaSession' in navigator) {
+  const on = (name, fn) => { try { navigator.mediaSession.setActionHandler(name, fn); } catch (e) {} };
+  on('play', () => { wantPlaying = true; keepAwake(); if (playerReady && current) player.playVideo(); });
+  on('pause', () => { wantPlaying = false; if (playerReady && current) player.pauseVideo(); });
+  on('previoustrack', () => step(-1));
+  on('nexttrack', () => step(1));
+  on('seekbackward', () => $('#back').click());
+  on('seekforward', () => $('#fwd').click());
+}
 
 /* ---------- Boot ---------- */
 route(readRedirect());
