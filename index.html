@@ -62,9 +62,10 @@
   }
   header.top strong { font-size: 20px; letter-spacing: -0.02em; }
   .link { background: none; border: 0; padding: 6px 0; color: var(--muted); font-size: 14px; }
-  nav.tabs { display: flex; gap: 6px; padding-bottom: 12px; }
+  nav.tabs { display: flex; gap: 6px; padding-bottom: 12px; overflow-x: auto; scrollbar-width: none; }
+  nav.tabs::-webkit-scrollbar { display: none; }
   nav.tabs button {
-    flex: 1; padding: 9px 2px; border-radius: 999px; font-size: 13px;
+    flex: 1 0 auto; padding: 9px 12px; border-radius: 999px; font-size: 13px;
     border: 1px solid var(--line); background: transparent; color: var(--muted);
   }
   nav.tabs button.on { background: var(--text); border-color: var(--text); color: var(--bg); font-weight: 600; }
@@ -79,9 +80,16 @@
   .view-head { display: flex; align-items: center; gap: 10px; margin: 4px 0 6px; }
   .view-head h2 { font-size: 16px; margin: 0; flex: 1; }
 
-  .row {
-    display: block; width: 100%; text-align: left; background: none; border: 0;
-    border-bottom: 1px solid var(--line); padding: 13px 0;
+  .row { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+  .row-main { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 13px 0; }
+  .row-act {
+    flex: none; min-height: 32px; padding: 6px 10px; border-radius: 999px; font-size: 12px;
+    background: none; border: 1px solid var(--line); color: var(--muted);
+  }
+  .row-act.done { border-color: transparent; color: var(--accent); }
+  .notice {
+    position: sticky; top: 0; z-index: 2; margin-bottom: 8px; padding: 12px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--line); color: var(--muted); font-size: 14px;
   }
   .row-title { display: block; }
   .row-sub { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
@@ -167,6 +175,7 @@
       <button type="button" data-tab="search">Search</button>
       <button type="button" data-tab="subs">Channels</button>
       <button type="button" data-tab="playlists">Playlists</button>
+      <button type="button" data-tab="later">Later</button>
       <button type="button" data-tab="recent">Recent</button>
     </nav>
     <main id="main"></main>
@@ -201,7 +210,7 @@
 /* You can hard-code your client ID here instead of pasting it in the app. */
 const CLIENT_ID = '1088859243587-3uffs86f7rsjvm063eoqi8a0e7h2gusd.apps.googleusercontent.com';
 
-const SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
+const SCOPE = 'https://www.googleapis.com/auth/youtube';
 const API = 'https://www.googleapis.com/youtube/v3/';
 const REDIRECT = location.origin + location.pathname;
 
@@ -245,7 +254,10 @@ function readRedirect() {
   store.del('oauthState');
   if (!expected || h.get('state') !== expected) return 'Sign-in could not be verified. Please try again.';
   if (h.get('error')) return 'Sign-in was cancelled.';
-  store.set('token', { value: h.get('access_token'), exp: Date.now() + (Number(h.get('expires_in') || 3600) - 60) * 1000 });
+  store.set('token', {
+    value: h.get('access_token'), scope: h.get('scope') || '',
+    exp: Date.now() + (Number(h.get('expires_in') || 3600) - 60) * 1000
+  });
   return '';
 }
 
@@ -254,12 +266,26 @@ function token() {
   return t && t.exp > Date.now() ? t.value : null;
 }
 
-async function api(path, params) {
+/* True when the current sign-in may edit playlists (older sign-ins were read-only). */
+function canWrite() {
+  const t = store.get('token', null);
+  return !!t && (' ' + (t.scope || '') + ' ').indexOf(' ' + SCOPE + ' ') >= 0;
+}
+
+async function api(path, params, opts) {
   const t = token();
   if (!t) throw new Error('auth');
   const clean = {};
   for (const k in params) if (params[k] != null) clean[k] = params[k];
-  const r = await fetch(API + path + '?' + new URLSearchParams(clean), { headers: { Authorization: 'Bearer ' + t } });
+  const init = { headers: { Authorization: 'Bearer ' + t } };
+  if (opts) {
+    init.method = opts.method;
+    if (opts.body) {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(opts.body);
+    }
+  }
+  const r = await fetch(API + path + '?' + new URLSearchParams(clean), init);
   if (r.status === 401) { store.del('token'); throw new Error('auth'); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
@@ -269,7 +295,10 @@ async function api(path, params) {
       q.fatal = true;
       throw q;
     }
-    throw new Error((j.error && j.error.message) || 'Something went wrong talking to YouTube.');
+    const message = (j.error && j.error.message) || '';
+    if (reason === 'insufficientPermissions' || /insufficient.*scope/i.test(message)) throw new Error('scope');
+    if (reason === 'playlistNotFound' && clean.playlistId === store.get('laterId', '')) store.del('laterId');
+    throw new Error(message || 'Something went wrong talking to YouTube.');
   }
   return j;
 }
@@ -302,7 +331,7 @@ $('#cid-save').onclick = () => {
 };
 $('#signin-btn').onclick = signIn;
 $('#reset-btn').onclick = () => { store.del('clientId'); route(); };
-$('#signout').onclick = () => { store.del('token'); store.del('feed'); route(); };
+$('#signout').onclick = () => { store.del('token'); store.del('feed'); store.del('laterId'); route(); };
 
 /* ---------- Lists ---------- */
 let listTracks = [];
@@ -313,12 +342,118 @@ function markPlaying() {
   });
 }
 
+/* ---------- Durations ---------- */
+const durs = store.get('durs', {});
+
+const isoDur = iso => {
+  const m = /^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso || '');
+  if (!m) return '';
+  const s = (+m[1] || 0) * 86400 + (+m[2] || 0) * 3600 + (+m[3] || 0) * 60 + (+m[4] || 0);
+  return s ? fmt(s) : 'Live';
+};
+
+/* rows: [{ item, sub }]. Appends each video's length to its second line. */
+async function addDurations(rows) {
+  rows.forEach(r => { r.base = r.sub.textContent; });
+  const paint = () => rows.forEach(r => {
+    const d = durs[r.item.id];
+    if (d) { r.sub.textContent = (r.base ? r.base + ' · ' : '') + d; r.sub.hidden = false; }
+  });
+  paint();
+  const need = Array.from(new Set(rows.map(r => r.item.id).filter(id => !durs[id])));
+  try {
+    for (let i = 0; i < need.length; i += 50) {
+      const j = await api('videos', { part: 'contentDetails', id: need.slice(i, i + 50).join(','), maxResults: 50 });
+      (j.items || []).forEach(v => { durs[v.id] = isoDur(v.contentDetails && v.contentDetails.duration); });
+      paint();
+    }
+    const keys = Object.keys(durs);
+    if (keys.length > 800) keys.slice(0, keys.length - 800).forEach(k => { delete durs[k]; });
+    if (need.length) store.set('durs', durs);
+  } catch (e) {}
+}
+
+/* ---------- Listen Later ---------- */
+const LATER_NAME = 'Listen Later';
+
+/* Finds the playlist by name, and makes it (private) when asked to and it is missing. */
+async function laterId(create) {
+  let id = store.get('laterId', '');
+  if (id) return id;
+  let pageToken;
+  do {
+    const j = await api('playlists', { part: 'snippet', mine: 'true', maxResults: 50, pageToken: pageToken });
+    const hit = (j.items || []).find(p => p.snippet.title.trim().toLowerCase() === LATER_NAME.toLowerCase());
+    if (hit) { id = hit.id; break; }
+    pageToken = j.nextPageToken;
+  } while (pageToken);
+  if (!id && create) {
+    const made = await api('playlists', { part: 'snippet,status' }, {
+      method: 'POST',
+      body: { snippet: { title: LATER_NAME, description: 'Saved for listening.' }, status: { privacyStatus: 'private' } }
+    });
+    id = made.id;
+  }
+  if (id) store.set('laterId', id);
+  return id;
+}
+
+function askWrite() {
+  const main = $('#main');
+  const old = main.querySelector('.notice');
+  if (old) old.remove();
+  const box = el('div', 'notice', 'To save or remove videos, Listen needs permission to edit your YouTube playlists.');
+  const allow = el('button', 'primary', 'Allow');
+  allow.type = 'button';
+  allow.onclick = signIn;
+  box.append(allow);
+  main.prepend(box);
+}
+
+function actButton(label, doneLabel, work) {
+  const b = el('button', 'row-act', label);
+  b.type = 'button';
+  b.onclick = async () => {
+    if (b.classList.contains('done')) return;
+    b.disabled = true;
+    try {
+      if (!canWrite()) throw new Error('scope');
+      await work();
+      b.textContent = doneLabel;
+      b.classList.add('done');
+    } catch (e) {
+      if (e.message === 'scope' || e.message === 'auth') { b.textContent = label; askWrite(); }
+      else { b.textContent = 'Failed'; b.title = e.message; }
+    }
+    b.disabled = false;
+  };
+  return b;
+}
+
+const laterButton = item => actButton('+ Later', 'Saved', async () => {
+  const id = await laterId(true);
+  await api('playlistItems', { part: 'snippet' }, {
+    method: 'POST',
+    body: { snippet: { playlistId: id, resourceId: { kind: 'youtube#video', videoId: item.id } } }
+  });
+});
+
+const removeButton = (item, row) => actButton('Remove', 'Removed', async () => {
+  await api('playlistItems', { id: item.itemId }, { method: 'DELETE' });
+  row.hidden = true;
+});
+
 function showError(node, e) {
   if (e.message === 'auth') {
     const again = el('button', 'primary', 'Sign in again');
     again.type = 'button';
     again.onclick = signIn;
     node.replaceChildren('Your session ended. Google sessions last about an hour.', again);
+  } else if (e.message === 'scope') {
+    const allow = el('button', 'primary', 'Allow');
+    allow.type = 'button';
+    allow.onclick = signIn;
+    node.replaceChildren('Listen needs permission to edit your YouTube playlists for this.', allow);
   } else {
     node.replaceChildren(e.message);
   }
@@ -356,21 +491,27 @@ function listView(mount, opts) {
     status.replaceChildren('Loading…');
     try {
       const page = await opts.loader(pageToken);
+      const added = [];
       page.items.forEach(item => {
-        const row = el('button', 'row');
-        row.type = 'button';
-        row.append(el('span', 'row-title', item.title));
-        const sub = opts.onPick ? item.sub : item.channel;
-        if (sub) row.append(el('span', 'row-sub', sub));
+        const row = el('div', 'row');
+        const main = el('button', 'row-main');
+        main.type = 'button';
+        const sub = el('span', 'row-sub', (opts.onPick ? item.sub : item.channel) || '');
+        sub.hidden = !sub.textContent;
+        main.append(el('span', 'row-title', item.title), sub);
+        row.append(main);
         if (opts.onPick) {
-          row.onclick = () => opts.onPick(item);
+          main.onclick = () => opts.onPick(item);
         } else {
           const i = tracks.push(item) - 1;
           row.dataset.id = item.id;
-          row.onclick = () => playFrom(tracks, i);
+          main.onclick = () => playFrom(tracks, i);
+          row.append(opts.action ? opts.action(item, row) : laterButton(item));
+          added.push({ item: item, sub: sub });
         }
         list.append(row);
       });
+      addDurations(added);
       status.hidden = list.children.length > 0;
       if (!list.children.length) status.replaceChildren(opts.empty || 'Nothing here.');
       more.hidden = !page.next;
@@ -401,7 +542,10 @@ const playlistLoader = id => async pageToken => {
     items: (j.items || [])
       .filter(i => i.snippet && i.snippet.resourceId && i.snippet.resourceId.videoId &&
                    i.snippet.title !== 'Private video' && i.snippet.title !== 'Deleted video')
-      .map(i => ({ id: i.snippet.resourceId.videoId, title: i.snippet.title, channel: i.snippet.videoOwnerChannelTitle || '' })),
+      .map(i => ({
+        id: i.snippet.resourceId.videoId, itemId: i.id, title: i.snippet.title,
+        channel: i.snippet.videoOwnerChannelTitle || ''
+      })),
     next: j.nextPageToken
   };
 };
@@ -555,6 +699,36 @@ const tabs = {
       })
     });
   },
+  later(main) {
+    const head = el('div', 'view-head');
+    head.append(el('h2', '', LATER_NAME));
+    const body = el('div');
+    const note = el('div', 'note', 'Loading…');
+    body.append(note);
+    main.replaceChildren(head, body);
+    (async () => {
+      try {
+        const id = await laterId(false);
+        if (id) {
+          listView(body, {
+            loader: playlistLoader(id), action: removeButton,
+            empty: 'Nothing saved yet. Save videos to "' + LATER_NAME + '" in YouTube, or tap + Later here.'
+          });
+          return;
+        }
+        const make = el('button', 'primary', canWrite() ? 'Create the playlist' : 'Allow');
+        make.type = 'button';
+        make.onclick = async () => {
+          if (!canWrite()) return signIn();
+          make.disabled = true;
+          try { await laterId(true); tabs.later(main); } catch (e) { showError(note, e); }
+        };
+        note.replaceChildren('You have no "' + LATER_NAME + '" playlist on YouTube yet. Listen can make one for you.', make);
+      } catch (e) {
+        showError(note, e);
+      }
+    })();
+  },
   recent(main) {
     listView(main, {
       title: 'Recently played', empty: 'Nothing played yet.',
@@ -567,6 +741,8 @@ function openTab(name) {
   if (!tabs[name]) name = 'feed';
   store.set('tab', name);
   document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  const on = document.querySelector('nav.tabs button.on');
+  if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   tabs[name]($('#main'));
 }
 document.querySelectorAll('nav.tabs button').forEach(b => { b.onclick = () => openTab(b.dataset.tab); });
