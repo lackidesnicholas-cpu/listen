@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Listen">
+<meta name="theme-color" content="#121413">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Listen</title>
+<style>
+  :root {
+    --bg: #121413;
+    --panel: #1b1e1c;
+    --line: #2a2f2c;
+    --text: #ecebe4;
+    --muted: #8f958f;
+    --accent: #e8b04a;
+    --accent-ink: #1a1405;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) 0 0;
+    min-height: 100vh;
+  }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  [hidden] { display: none !important; }
+
+  .wrap { max-width: 640px; margin: 0 auto; padding: 0 16px; }
+
+  /* Setup and sign-in screens */
+  .screen { padding-top: 48px; padding-bottom: 48px; }
+  .screen h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: -0.02em; }
+  .screen p { color: var(--muted); margin: 0 0 16px; }
+  .screen ol { color: var(--muted); padding-left: 20px; margin: 0 0 20px; }
+  .screen li { margin-bottom: 6px; }
+  .screen code {
+    display: block; margin: 6px 0; padding: 10px 12px; border-radius: 8px;
+    background: var(--panel); color: var(--text); font-size: 13px;
+    word-break: break-all; user-select: all; -webkit-user-select: all;
+  }
+  .field {
+    width: 100%; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--panel); outline: none;
+  }
+  .field:focus { border-color: var(--accent); }
+  .primary {
+    width: 100%; margin-top: 12px; padding: 13px 16px; border: 0; border-radius: 10px;
+    background: var(--accent); color: var(--accent-ink); font-weight: 600;
+  }
+  .msg { color: var(--accent); margin: 0 0 16px; }
+
+  /* App chrome */
+  header.top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding-top: 14px; padding-bottom: 10px;
+  }
+  header.top strong { font-size: 20px; letter-spacing: -0.02em; }
+  .link { background: none; border: 0; padding: 6px 0; color: var(--muted); font-size: 14px; }
+  nav.tabs { display: flex; gap: 6px; padding-bottom: 12px; }
+  nav.tabs button {
+    flex: 1; padding: 9px 4px; border-radius: 999px; font-size: 14px;
+    border: 1px solid var(--line); background: transparent; color: var(--muted);
+  }
+  nav.tabs button.on { background: var(--text); border-color: var(--text); color: var(--bg); font-weight: 600; }
+
+  main { padding-bottom: 220px; }
+  .search { display: flex; gap: 8px; margin-bottom: 8px; }
+  .search .field { flex: 1; }
+  .search button {
+    padding: 0 16px; border: 0; border-radius: 10px;
+    background: var(--accent); color: var(--accent-ink); font-weight: 600;
+  }
+  .view-head { display: flex; align-items: center; gap: 10px; margin: 4px 0 6px; }
+  .view-head h2 { font-size: 16px; margin: 0; }
+
+  .row {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    border-bottom: 1px solid var(--line); padding: 13px 0;
+  }
+  .row-title { display: block; }
+  .row-sub { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .row.is-playing .row-title { color: var(--accent); }
+  .note { color: var(--muted); padding: 20px 0; }
+  .more {
+    width: 100%; margin-top: 14px; padding: 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: transparent; color: var(--muted);
+  }
+
+  /* Player bar */
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; overflow: hidden;
+    background: var(--panel); border-top: 1px solid var(--line);
+    padding: 12px 0 calc(12px + env(safe-area-inset-bottom));
+  }
+  #now-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #now-sub { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #seek { width: 100%; margin: 10px 0 2px; accent-color: var(--accent); }
+  .times { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .controls { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+  .controls button {
+    background: none; border: 0; padding: 8px 6px; min-width: 44px; min-height: 44px;
+    color: var(--text); font-size: 14px;
+  }
+  .controls #toggle {
+    background: var(--accent); color: var(--accent-ink); font-weight: 700;
+    border-radius: 999px; min-width: 84px;
+  }
+
+  /* The YouTube player lives inside the bar, invisible. It only accepts taps
+     when iOS refuses to start audio without a direct touch on the player. */
+  #ytwrap { position: absolute; inset: 0; opacity: 0.01; pointer-events: none; z-index: 0; }
+  #ytwrap iframe { width: 100%; height: 100%; border: 0; }
+  #tap {
+    position: absolute; inset: 0; z-index: 4; background: var(--accent); color: var(--accent-ink);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 16px;
+  }
+  #tap b { font-size: 18px; }
+  #tap span { font-size: 13px; opacity: 0.8; margin-top: 4px; }
+  #bar.needtap #ytwrap { pointer-events: auto; z-index: 5; }
+  #tap-dismiss {
+    position: absolute; top: 6px; right: 10px; z-index: 6;
+    background: none; border: 0; color: var(--accent-ink); font-size: 13px; padding: 8px;
+  }
+  .bar-inner { position: relative; z-index: 1; }
+</style>
+</head>
+<body>
+
+<!-- First run: paste the Google client ID -->
+<section id="setup" class="screen wrap" hidden>
+  <h1>Listen</h1>
+  <p>One-time setup. Create a Google OAuth client ID (type: Web application) and paste it below.</p>
+  <ol>
+    <li>Authorized JavaScript origin:<code id="origin"></code></li>
+    <li>Authorized redirect URI:<code id="redirect"></code></li>
+  </ol>
+  <input id="cid" class="field" placeholder="1234567890-abc.apps.googleusercontent.com" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <button id="cid-save" class="primary" type="button">Save</button>
+  <p id="cid-err" class="msg" style="margin-top:12px" hidden>That does not look like a client ID. It should end in .apps.googleusercontent.com</p>
+</section>
+
+<!-- Sign in -->
+<section id="signin" class="screen wrap" hidden>
+  <h1>Listen</h1>
+  <p id="signin-msg" class="msg" hidden></p>
+  <p>YouTube, without the pictures. Sign in to reach your subscriptions and playlists.</p>
+  <button id="signin-btn" class="primary" type="button">Sign in with Google</button>
+  <button id="reset-btn" class="link" type="button" style="margin-top:16px">Change client ID</button>
+</section>
+
+<!-- App -->
+<section id="app" hidden>
+  <div class="wrap">
+    <header class="top">
+      <strong>Listen</strong>
+      <button id="signout" class="link" type="button">Sign out</button>
+    </header>
+    <nav class="tabs">
+      <button type="button" data-tab="search">Search</button>
+      <button type="button" data-tab="subs">Channels</button>
+      <button type="button" data-tab="playlists">Playlists</button>
+      <button type="button" data-tab="recent">Recent</button>
+    </nav>
+    <main id="main"></main>
+  </div>
+</section>
+
+<!-- Player -->
+<div id="bar" hidden>
+  <div id="ytwrap"><div id="yt"></div></div>
+  <div id="tap" hidden>
+    <b>Tap here to start the audio</b>
+    <span>iPhone sometimes needs one direct tap before sound can play.</span>
+  </div>
+  <button id="tap-dismiss" type="button" hidden>Dismiss</button>
+  <div class="wrap bar-inner">
+    <div id="now-title"></div>
+    <div id="now-sub"></div>
+    <input id="seek" type="range" min="0" max="1" step="1" value="0" aria-label="Position">
+    <div class="times"><span id="t-cur">0:00</span><span id="t-dur">0:00</span></div>
+    <div class="controls">
+      <button id="prev" type="button" aria-label="Previous">Prev</button>
+      <button id="back" type="button" aria-label="Back 15 seconds">-15s</button>
+      <button id="toggle" type="button">Play</button>
+      <button id="fwd" type="button" aria-label="Forward 30 seconds">+30s</button>
+      <button id="next" type="button" aria-label="Next">Next</button>
+      <button id="speed" type="button" aria-label="Playback speed">1x</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* You can hard-code your client ID here instead of pasting it in the app. */
+const CLIENT_ID = '1088859243587-3uffs86f7rsjvm063eoqi8a0e7h2gusd.apps.googleusercontent.com';
+
+const SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
+const API = 'https://www.googleapis.com/youtube/v3/';
+const REDIRECT = location.origin + location.pathname;
+
+const $ = s => document.querySelector(s);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+const decode = s => { const t = document.createElement('textarea'); t.innerHTML = s || ''; return t.value; };
+const fmt = s => {
+  s = Math.max(0, Math.floor(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = String(s % 60).padStart(2, '0');
+  return h ? h + ':' + String(m).padStart(2, '0') + ':' + sec : m + ':' + sec;
+};
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+  del(k) { try { localStorage.removeItem(k); } catch (e) {} }
+};
+
+/* ---------- Sign-in ---------- */
+const clientId = () => CLIENT_ID || store.get('clientId', '');
+
+function signIn() {
+  const state = Array.from(crypto.getRandomValues(new Uint32Array(2))).join('');
+  store.set('oauthState', state);
+  const p = new URLSearchParams({
+    client_id: clientId(), redirect_uri: REDIRECT, response_type: 'token',
+    scope: SCOPE, state: state, include_granted_scopes: 'true'
+  });
+  location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + p;
+}
+
+function readRedirect() {
+  if (!/access_token=|error=/.test(location.hash)) return '';
+  const h = new URLSearchParams(location.hash.slice(1));
+  history.replaceState(null, '', REDIRECT);
+  const expected = store.get('oauthState', null);
+  store.del('oauthState');
+  if (!expected || h.get('state') !== expected) return 'Sign-in could not be verified. Please try again.';
+  if (h.get('error')) return 'Sign-in was cancelled.';
+  store.set('token', { value: h.get('access_token'), exp: Date.now() + (Number(h.get('expires_in') || 3600) - 60) * 1000 });
+  return '';
+}
+
+function token() {
+  const t = store.get('token', null);
+  return t && t.exp > Date.now() ? t.value : null;
+}
+
+async function api(path, params) {
+  const t = token();
+  if (!t) throw new Error('auth');
+  const clean = {};
+  for (const k in params) if (params[k] != null) clean[k] = params[k];
+  const r = await fetch(API + path + '?' + new URLSearchParams(clean), { headers: { Authorization: 'Bearer ' + t } });
+  if (r.status === 401) { store.del('token'); throw new Error('auth'); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const reason = j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason;
+    if (reason === 'quotaExceeded') throw new Error('Daily YouTube limit reached. It resets at midnight Pacific time.');
+    throw new Error((j.error && j.error.message) || 'Something went wrong talking to YouTube.');
+  }
+  return j;
+}
+
+/* ---------- Screens ---------- */
+function show(name, msg) {
+  ['setup', 'signin', 'app'].forEach(id => { $('#' + id).hidden = id !== name; });
+  if (name === 'signin') {
+    $('#signin-msg').hidden = !msg;
+    $('#signin-msg').textContent = msg || '';
+  }
+}
+
+function route(msg) {
+  if (!clientId()) {
+    $('#origin').textContent = location.origin;
+    $('#redirect').textContent = REDIRECT;
+    return show('setup');
+  }
+  if (!token()) return show('signin', msg);
+  show('app');
+  openTab(store.get('tab', 'search'));
+}
+
+$('#cid-save').onclick = () => {
+  const v = $('#cid').value.trim();
+  const ok = /\.apps\.googleusercontent\.com$/.test(v);
+  $('#cid-err').hidden = ok;
+  if (ok) { store.set('clientId', v); route(); }
+};
+$('#signin-btn').onclick = signIn;
+$('#reset-btn').onclick = () => { store.del('clientId'); route(); };
+$('#signout').onclick = () => { store.del('token'); route(); };
+
+/* ---------- Lists ---------- */
+let listTracks = [];
+
+function markPlaying() {
+  document.querySelectorAll('.row[data-id]').forEach(r => {
+    r.classList.toggle('is-playing', !!current && r.dataset.id === current.id);
+  });
+}
+
+/* loader(pageToken) resolves to { items, next }.
+   If onPick is given, rows are folders; otherwise rows are playable tracks. */
+function listView(mount, opts) {
+  const tracks = [];
+  if (!opts.onPick) listTracks = tracks;
+  mount.replaceChildren();
+
+  if (opts.title) {
+    const head = el('div', 'view-head');
+    if (opts.back) {
+      const b = el('button', 'link', '← Back');
+      b.type = 'button';
+      b.onclick = opts.back;
+      head.append(b);
+    }
+    head.append(el('h2', '', opts.title));
+    mount.append(head);
+  }
+
+  const list = el('div');
+  const status = el('div', 'note', 'Loading…');
+  const more = el('button', 'more', 'Load more');
+  more.type = 'button';
+  more.hidden = true;
+  mount.append(list, status, more);
+
+  async function load(pageToken) {
+    more.disabled = true;
+    status.hidden = false;
+    status.replaceChildren('Loading…');
+    try {
+      const page = await opts.loader(pageToken);
+      page.items.forEach(item => {
+        const row = el('button', 'row');
+        row.type = 'button';
+        row.append(el('span', 'row-title', item.title));
+        const sub = opts.onPick ? item.sub : item.channel;
+        if (sub) row.append(el('span', 'row-sub', sub));
+        if (opts.onPick) {
+          row.onclick = () => opts.onPick(item);
+        } else {
+          const i = tracks.push(item) - 1;
+          row.dataset.id = item.id;
+          row.onclick = () => playFrom(tracks, i);
+        }
+        list.append(row);
+      });
+      status.hidden = list.children.length > 0;
+      if (!list.children.length) status.replaceChildren(opts.empty || 'Nothing here.');
+      more.hidden = !page.next;
+      more.onclick = () => load(page.next);
+      markPlaying();
+    } catch (e) {
+      status.hidden = false;
+      if (e.message === 'auth') {
+        const again = el('button', 'primary', 'Sign in again');
+        again.type = 'button';
+        again.onclick = signIn;
+        status.replaceChildren('Your session ended. Google sessions last about an hour.', again);
+      } else {
+        status.replaceChildren(e.message);
+      }
+    }
+    more.disabled = false;
+  }
+  load();
+}
+
+const searchLoader = q => async pageToken => {
+  const j = await api('search', { part: 'snippet', type: 'video', maxResults: 25, q: q, pageToken: pageToken });
+  return {
+    items: (j.items || []).filter(i => i.id && i.id.videoId).map(i => ({
+      id: i.id.videoId, title: decode(i.snippet.title), channel: decode(i.snippet.channelTitle)
+    })),
+    next: j.nextPageToken
+  };
+};
+
+const playlistLoader = id => async pageToken => {
+  const j = await api('playlistItems', { part: 'snippet', playlistId: id, maxResults: 50, pageToken: pageToken });
+  return {
+    items: (j.items || [])
+      .filter(i => i.snippet && i.snippet.resourceId && i.snippet.resourceId.videoId &&
+                   i.snippet.title !== 'Private video' && i.snippet.title !== 'Deleted video')
+      .map(i => ({ id: i.snippet.resourceId.videoId, title: i.snippet.title, channel: i.snippet.videoOwnerChannelTitle || '' })),
+    next: j.nextPageToken
+  };
+};
+
+const subsLoader = async pageToken => {
+  const j = await api('subscriptions', { part: 'snippet', mine: 'true', maxResults: 50, order: 'alphabetical', pageToken: pageToken });
+  return {
+    items: (j.items || []).map(i => ({ title: i.snippet.title, sub: '', channelId: i.snippet.resourceId.channelId })),
+    next: j.nextPageToken
+  };
+};
+
+const myPlaylistsLoader = async pageToken => {
+  const j = await api('playlists', { part: 'snippet,contentDetails', mine: 'true', maxResults: 50, pageToken: pageToken });
+  const items = (j.items || []).map(i => ({
+    title: i.snippet.title, sub: i.contentDetails.itemCount + ' videos', id: i.id
+  }));
+  if (!pageToken) items.unshift({ title: 'Liked videos', sub: '', id: 'LL' });
+  return { items: items, next: j.nextPageToken };
+};
+
+/* ---------- Tabs ---------- */
+const tabs = {
+  search(main) {
+    const form = el('form', 'search');
+    const input = el('input', 'field');
+    input.type = 'search';
+    input.placeholder = 'Search YouTube';
+    input.value = store.get('lastQuery', '');
+    const go = el('button', '', 'Go');
+    go.type = 'submit';
+    form.append(input, go);
+    const results = el('div');
+    main.replaceChildren(form, results);
+    const run = () => {
+      const q = input.value.trim();
+      if (!q) return;
+      store.set('lastQuery', q);
+      input.blur();
+      listView(results, { loader: searchLoader(q), empty: 'No results.' });
+    };
+    form.onsubmit = e => { e.preventDefault(); run(); };
+    if (!input.value) results.append(el('div', 'note', 'Search for something to listen to.'));
+  },
+  subs(main) {
+    listView(main, {
+      title: 'Your channels', loader: subsLoader, empty: 'No subscriptions found.',
+      onPick: ch => listView(main, {
+        title: ch.title, back: () => tabs.subs(main), empty: 'No uploads found.',
+        loader: playlistLoader('UU' + ch.channelId.slice(2))
+      })
+    });
+  },
+  playlists(main) {
+    listView(main, {
+      title: 'Your playlists', loader: myPlaylistsLoader,
+      onPick: pl => listView(main, {
+        title: pl.title, back: () => tabs.playlists(main), empty: 'This playlist is empty.',
+        loader: playlistLoader(pl.id)
+      })
+    });
+  },
+  recent(main) {
+    listView(main, {
+      title: 'Recently played', empty: 'Nothing played yet.',
+      loader: async () => ({ items: store.get('recent', []) })
+    });
+  }
+};
+
+function openTab(name) {
+  if (!tabs[name]) name = 'search';
+  store.set('tab', name);
+  document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  tabs[name]($('#main'));
+}
+document.querySelectorAll('nav.tabs button').forEach(b => { b.onclick = () => openTab(b.dataset.tab); });
+
+/* ---------- Player ---------- */
+let player = null, playerReady = false, pending = false;
+let queue = [], qi = -1, current = null, tapTimer = null, dragging = false;
+const SPEEDS = [1, 1.25, 1.5, 2];
+let speedIndex = 0;
+
+function setNeedTap(on) {
+  $('#bar').classList.toggle('needtap', on);
+  $('#tap').hidden = !on;
+  $('#tap-dismiss').hidden = !on;
+}
+$('#tap-dismiss').onclick = () => setNeedTap(false);
+
+window.onYouTubeIframeAPIReady = () => {
+  player = new YT.Player('yt', {
+    width: 200, height: 200,
+    playerVars: { playsinline: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, iv_load_policy: 3 },
+    events: {
+      onReady: () => { playerReady = true; if (pending) { pending = false; start(); } },
+      onStateChange: e => {
+        if (e.data === 1) {
+          setNeedTap(false);
+          $('#toggle').textContent = 'Pause';
+          player.setPlaybackRate(SPEEDS[speedIndex]);
+        } else if (e.data === 2) {
+          $('#toggle').textContent = 'Play';
+        } else if (e.data === 0) {
+          $('#toggle').textContent = 'Play';
+          step(1);
+        }
+      },
+      onError: () => {
+        clearTimeout(tapTimer);
+        setNeedTap(false);
+        $('#now-sub').textContent = 'This one cannot be played outside YouTube.';
+        if (qi < queue.length - 1) setTimeout(() => step(1), 1500);
+      }
+    }
+  });
+};
+
+function playFrom(list, i) {
+  queue = list;
+  qi = i;
+  start();
+}
+
+function step(dir) {
+  const n = qi + dir;
+  if (n < 0 || n >= queue.length) return;
+  qi = n;
+  start();
+}
+
+function start() {
+  current = queue[qi];
+  if (!current) return;
+  $('#bar').hidden = false;
+  $('#now-title').textContent = current.title;
+  $('#now-sub').textContent = current.channel || '';
+  $('#seek').value = 0;
+  $('#t-cur').textContent = '0:00';
+  $('#t-dur').textContent = '0:00';
+  markPlaying();
+
+  const recent = store.get('recent', []).filter(t => t.id !== current.id);
+  recent.unshift({ id: current.id, title: current.title, channel: current.channel || '' });
+  store.set('recent', recent.slice(0, 50));
+
+  if (!playerReady) { pending = true; return; }
+  player.loadVideoById(current.id);
+
+  /* If iOS blocks the automatic start, ask for one direct tap on the player. */
+  clearTimeout(tapTimer);
+  const check = n => {
+    const s = player.getPlayerState();
+    if (s === -1 || s === 5) setNeedTap(true);
+    else if (s === 3 && n < 4) tapTimer = setTimeout(() => check(n + 1), 2000);
+  };
+  tapTimer = setTimeout(() => check(0), 2500);
+}
+
+$('#toggle').onclick = () => {
+  if (!playerReady || !current) return;
+  if (player.getPlayerState() === 1) player.pauseVideo(); else player.playVideo();
+};
+$('#prev').onclick = () => step(-1);
+$('#next').onclick = () => step(1);
+$('#back').onclick = () => { if (playerReady && current) player.seekTo(Math.max(0, player.getCurrentTime() - 15), true); };
+$('#fwd').onclick = () => { if (playerReady && current) player.seekTo(player.getCurrentTime() + 30, true); };
+$('#speed').onclick = () => {
+  speedIndex = (speedIndex + 1) % SPEEDS.length;
+  $('#speed').textContent = SPEEDS[speedIndex] + 'x';
+  if (playerReady) player.setPlaybackRate(SPEEDS[speedIndex]);
+};
+$('#seek').addEventListener('input', () => { dragging = true; $('#t-cur').textContent = fmt($('#seek').value); });
+$('#seek').addEventListener('change', () => {
+  if (playerReady && current) player.seekTo(Number($('#seek').value), true);
+  dragging = false;
+});
+
+setInterval(() => {
+  if (!playerReady || !current || !player.getCurrentTime) return;
+  const d = player.getDuration() || 0, c = player.getCurrentTime() || 0;
+  if (!dragging) {
+    $('#seek').max = d || 1;
+    $('#seek').value = c;
+    $('#t-cur').textContent = fmt(c);
+  }
+  $('#t-dur').textContent = d ? fmt(d) : '';
+}, 500);
+
+/* ---------- Boot ---------- */
+route(readRedirect());
+</script>
+<script src="https://www.youtube.com/iframe_api"></script>
+</body>
+</html>
