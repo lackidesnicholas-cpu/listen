@@ -81,7 +81,14 @@
   .view-head h2 { font-size: 16px; margin: 0; flex: 1; }
 
   .row { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
-  .row-main { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 13px 0; }
+  .row-main {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px;
+    text-align: left; background: none; border: 0; padding: 13px 0;
+  }
+  .row-text { flex: 1; min-width: 0; }
+  .thumb { flex: none; width: 88px; height: 50px; object-fit: cover; border-radius: 6px; background: var(--panel); }
+  body.nothumbs .thumb { display: none; }
+  .top-links { display: flex; gap: 16px; }
   .row-act {
     flex: none; min-height: 32px; padding: 6px 10px; border-radius: 999px; font-size: 12px;
     background: none; border: 1px solid var(--line); color: var(--muted);
@@ -168,10 +175,14 @@
   <div class="wrap">
     <header class="top">
       <strong>Listen</strong>
-      <button id="signout" class="link" type="button">Sign out</button>
+      <span class="top-links">
+        <button id="pics" class="link" type="button">Pictures: on</button>
+        <button id="signout" class="link" type="button">Sign out</button>
+      </span>
     </header>
     <nav class="tabs">
       <button type="button" data-tab="feed">New</button>
+      <button type="button" data-tab="foryou">For you</button>
       <button type="button" data-tab="search">Search</button>
       <button type="button" data-tab="subs">Channels</button>
       <button type="button" data-tab="playlists">Playlists</button>
@@ -331,7 +342,19 @@ $('#cid-save').onclick = () => {
 };
 $('#signin-btn').onclick = signIn;
 $('#reset-btn').onclick = () => { store.del('clientId'); route(); };
-$('#signout').onclick = () => { store.del('token'); store.del('feed'); store.del('laterId'); route(); };
+$('#signout').onclick = () => {
+  ['token', 'feed', 'foryou', 'laterId'].forEach(k => store.del(k));
+  route();
+};
+
+/* Thumbnails are lazy-loaded, so hiding them also stops them downloading. */
+function setPics(on) {
+  store.set('thumbs', on);
+  document.body.classList.toggle('nothumbs', !on);
+  $('#pics').textContent = 'Pictures: ' + (on ? 'on' : 'off');
+}
+$('#pics').onclick = () => setPics(!store.get('thumbs', true));
+setPics(store.get('thumbs', true));
 
 /* ---------- Lists ---------- */
 let listTracks = [];
@@ -498,7 +521,17 @@ function listView(mount, opts) {
         main.type = 'button';
         const sub = el('span', 'row-sub', (opts.onPick ? item.sub : item.channel) || '');
         sub.hidden = !sub.textContent;
-        main.append(el('span', 'row-title', item.title), sub);
+        const text = el('span', 'row-text');
+        text.append(el('span', 'row-title', item.title), sub);
+        if (!opts.onPick) {
+          const img = el('img', 'thumb');
+          img.loading = 'lazy';
+          img.alt = '';
+          img.onerror = () => { img.style.visibility = 'hidden'; };
+          img.src = 'https://i.ytimg.com/vi/' + encodeURIComponent(item.id) + '/mqdefault.jpg';
+          main.append(img);
+        }
+        main.append(text);
         row.append(main);
         if (opts.onPick) {
           main.onclick = () => opts.onPick(item);
@@ -603,7 +636,7 @@ async function latestFrom(ch) {
     }));
 }
 
-async function buildFeed(onProgress) {
+async function allSubs() {
   const subs = [];
   let pageToken;
   do {
@@ -611,7 +644,11 @@ async function buildFeed(onProgress) {
     subs.push(...page.items);
     pageToken = page.next;
   } while (pageToken);
+  return subs;
+}
 
+async function buildFeed(onProgress) {
+  const subs = await allSubs();
   const out = [];
   let next = 0, done = 0;
   const worker = async () => {
@@ -626,39 +663,178 @@ async function buildFeed(onProgress) {
   return out.slice(0, 150);
 }
 
+/* ---------- For you ---------- */
+const FORYOU_TTL = 12 * 60 * 60 * 1000;
+
+const pickSome = (arr, n) =>
+  arr.map(v => [Math.random(), v]).sort((a, b) => a[0] - b[0]).slice(0, n).map(p => p[1]);
+
+/* A home-made recommendation list: recent uploads from channels you have liked but
+   do not follow, plus fresh videos on topics that show up across your likes. */
+async function buildForYou(say) {
+  say('Reading your likes…');
+  const likes = [];
+  let pageToken;
+  for (let n = 0; n < 2; n++) {
+    const j = await api('playlistItems', { part: 'snippet', playlistId: 'LL', maxResults: 50, pageToken: pageToken });
+    (j.items || []).forEach(i => {
+      const sn = i.snippet || {};
+      if (sn.resourceId && sn.resourceId.videoId && sn.videoOwnerChannelId) {
+        likes.push({ id: sn.resourceId.videoId, channelId: sn.videoOwnerChannelId, by: sn.videoOwnerChannelTitle || '' });
+      }
+    });
+    pageToken = j.nextPageToken;
+    if (!pageToken) break;
+  }
+  if (!likes.length) return [];
+
+  const followed = new Set((await allSubs()).map(c => c.channelId));
+  const seen = new Set(likes.map(l => l.id));
+  store.get('recent', []).forEach(t => seen.add(t.id));
+  const groups = [];
+
+  say('Checking channels you liked…');
+  const tally = {};
+  likes.forEach(l => {
+    if (followed.has(l.channelId)) return;
+    const c = tally[l.channelId] || (tally[l.channelId] = { channelId: l.channelId, title: l.by, n: 0 });
+    c.n++;
+  });
+  const chans = Object.keys(tally).map(k => tally[k]).sort((a, b) => b.n - a.n).slice(0, 8);
+  await Promise.all(chans.map(async ch => {
+    const vids = await latestFrom(ch);
+    groups.push(vids.slice(0, 3).map(v => Object.assign(v, { why: 'liked channel' })));
+  }));
+
+  say('Finding topics you like…');
+  const tagChans = {};
+  const cats = {};
+  for (let i = 0; i < likes.length; i += 50) {
+    const j = await api('videos', { part: 'snippet', id: likes.slice(i, i + 50).map(l => l.id).join(','), maxResults: 50 });
+    (j.items || []).forEach(v => {
+      const sn = v.snippet || {};
+      if (sn.categoryId) cats[sn.categoryId] = (cats[sn.categoryId] || 0) + 1;
+      (sn.tags || []).forEach(t => {
+        const k = t.trim().toLowerCase();
+        if (k.length < 3 || k.length > 30) return;
+        (tagChans[k] || (tagChans[k] = new Set())).add(sn.channelId);
+      });
+    });
+  }
+  /* A topic counts only when at least two different channels you liked share it. */
+  const tags = Object.keys(tagChans).filter(k => tagChans[k].size >= 2)
+    .sort((a, b) => tagChans[b].size - tagChans[a].size).slice(0, 8);
+  const after = new Date(Date.now() - 180 * 86400000).toISOString();
+  await Promise.all(pickSome(tags, 3).map(async tag => {
+    try {
+      const j = await api('search', { part: 'snippet', type: 'video', maxResults: 15, q: '"' + tag + '"', publishedAfter: after });
+      groups.push((j.items || [])
+        .filter(i => i.id && i.id.videoId && !followed.has(i.snippet.channelId))
+        .map(i => ({
+          id: i.id.videoId, title: decode(i.snippet.title), by: decode(i.snippet.channelTitle),
+          at: i.snippet.publishedAt, why: tag
+        })));
+    } catch (e) {
+      if (e.message === 'auth') throw e;
+    }
+  }));
+  if (tags.length < 3) {
+    const top = Object.keys(cats).sort((a, b) => cats[b] - cats[a])[0];
+    if (top) {
+      try {
+        const j = await api('videos', { part: 'snippet', chart: 'mostPopular', videoCategoryId: top, maxResults: 25 });
+        groups.push((j.items || [])
+          .filter(v => !followed.has(v.snippet.channelId))
+          .map(v => ({
+            id: v.id, title: v.snippet.title, by: v.snippet.channelTitle,
+            at: v.snippet.publishedAt, why: 'popular pick'
+          })));
+      } catch (e) {
+        if (e.message === 'auth') throw e;
+      }
+    }
+  }
+
+  /* Take turns between sources so the list is mixed, skipping repeats and things already liked or played. */
+  const out = [];
+  for (let r = 0; out.length < 60; r++) {
+    let any = false;
+    groups.forEach(g => {
+      const v = g[r];
+      if (!v) return;
+      any = true;
+      if (!seen.has(v.id)) { seen.add(v.id); out.push(v); }
+    });
+    if (!any) break;
+  }
+
+  /* Look up lengths now so very short clips can be dropped. */
+  try {
+    for (let i = 0; i < out.length; i += 50) {
+      const j = await api('videos', { part: 'contentDetails', id: out.slice(i, i + 50).map(v => v.id).join(','), maxResults: 50 });
+      (j.items || []).forEach(v => { durs[v.id] = isoDur(v.contentDetails && v.contentDetails.duration); });
+    }
+    store.set('durs', durs);
+  } catch (e) {
+    if (e.message === 'auth') throw e;
+  }
+  return out.filter(v => {
+    const d = durs[v.id];
+    return !d || d === 'Live' || d.split(':').length > 2 || parseInt(d, 10) >= 2;
+  });
+}
+
+/* A tab whose list is built once, kept on the device, and rebuilt when stale or on Refresh. */
+function cachedTab(main, o) {
+  const head = el('div', 'view-head');
+  const refresh = el('button', 'link', 'Refresh');
+  refresh.type = 'button';
+  head.append(el('h2', '', o.title), refresh);
+  const body = el('div');
+  main.replaceChildren(head, body);
+
+  const render = items => listView(body, {
+    empty: o.empty,
+    loader: async () => ({
+      items: items.map(t => ({ id: t.id, title: t.title, by: t.by, channel: t.by + ' · ' + o.line(t) }))
+    })
+  });
+  const load = async () => {
+    refresh.disabled = true;
+    const note = el('div', 'note', 'Loading…');
+    body.replaceChildren(note);
+    try {
+      const items = await o.build(text => { note.textContent = text; });
+      store.set(o.key, { at: Date.now(), items: items });
+      render(items);
+    } catch (e) {
+      showError(note, e);
+    }
+    refresh.disabled = false;
+  };
+  refresh.onclick = load;
+
+  const cached = store.get(o.key, null);
+  if (cached && Date.now() - cached.at < o.ttl) render(cached.items); else load();
+}
+
 /* ---------- Tabs ---------- */
 const tabs = {
   feed(main) {
-    const head = el('div', 'view-head');
-    const refresh = el('button', 'link', 'Refresh');
-    refresh.type = 'button';
-    head.append(el('h2', '', 'New from your channels'), refresh);
-    const body = el('div');
-    main.replaceChildren(head, body);
-
-    const render = items => listView(body, {
+    cachedTab(main, {
+      title: 'New from your channels', key: 'feed', ttl: FEED_TTL,
       empty: 'No recent uploads from your channels.',
-      loader: async () => ({
-        items: items.map(t => ({ id: t.id, title: t.title, by: t.by, channel: t.by + ' · ' + ago(t.at) }))
-      })
+      build: say => buildFeed((d, n) => say('Checking your channels… ' + d + ' of ' + n)),
+      line: t => ago(t.at)
     });
-    const load = async () => {
-      refresh.disabled = true;
-      const note = el('div', 'note', 'Checking your channels…');
-      body.replaceChildren(note);
-      try {
-        const items = await buildFeed((d, n) => { note.textContent = 'Checking your channels… ' + d + ' of ' + n; });
-        store.set('feed', { at: Date.now(), items: items });
-        render(items);
-      } catch (e) {
-        showError(note, e);
-      }
-      refresh.disabled = false;
-    };
-    refresh.onclick = load;
-
-    const cached = store.get('feed', null);
-    if (cached && Date.now() - cached.at < FEED_TTL) render(cached.items); else load();
+  },
+  foryou(main) {
+    cachedTab(main, {
+      title: 'For you', key: 'foryou', ttl: FORYOU_TTL,
+      empty: 'Nothing to suggest yet. Like a few videos on YouTube and this list fills in.',
+      build: buildForYou,
+      line: t => t.why
+    });
   },
   search(main) {
     const form = el('form', 'search');
