@@ -64,7 +64,7 @@
   .link { background: none; border: 0; padding: 6px 0; color: var(--muted); font-size: 14px; }
   nav.tabs { display: flex; gap: 6px; padding-bottom: 12px; }
   nav.tabs button {
-    flex: 1; padding: 9px 4px; border-radius: 999px; font-size: 14px;
+    flex: 1; padding: 9px 2px; border-radius: 999px; font-size: 13px;
     border: 1px solid var(--line); background: transparent; color: var(--muted);
   }
   nav.tabs button.on { background: var(--text); border-color: var(--text); color: var(--bg); font-weight: 600; }
@@ -77,7 +77,7 @@
     background: var(--accent); color: var(--accent-ink); font-weight: 600;
   }
   .view-head { display: flex; align-items: center; gap: 10px; margin: 4px 0 6px; }
-  .view-head h2 { font-size: 16px; margin: 0; }
+  .view-head h2 { font-size: 16px; margin: 0; flex: 1; }
 
   .row {
     display: block; width: 100%; text-align: left; background: none; border: 0;
@@ -163,6 +163,7 @@
       <button id="signout" class="link" type="button">Sign out</button>
     </header>
     <nav class="tabs">
+      <button type="button" data-tab="feed">New</button>
       <button type="button" data-tab="search">Search</button>
       <button type="button" data-tab="subs">Channels</button>
       <button type="button" data-tab="playlists">Playlists</button>
@@ -263,7 +264,11 @@ async function api(path, params) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
     const reason = j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason;
-    if (reason === 'quotaExceeded') throw new Error('Daily YouTube limit reached. It resets at midnight Pacific time.');
+    if (reason === 'quotaExceeded') {
+      const q = new Error('Daily YouTube limit reached. It resets at midnight Pacific time.');
+      q.fatal = true;
+      throw q;
+    }
     throw new Error((j.error && j.error.message) || 'Something went wrong talking to YouTube.');
   }
   return j;
@@ -286,7 +291,7 @@ function route(msg) {
   }
   if (!token()) return show('signin', msg);
   show('app');
-  openTab(store.get('tab', 'search'));
+  openTab(store.get('tab', 'feed'));
 }
 
 $('#cid-save').onclick = () => {
@@ -297,7 +302,7 @@ $('#cid-save').onclick = () => {
 };
 $('#signin-btn').onclick = signIn;
 $('#reset-btn').onclick = () => { store.del('clientId'); route(); };
-$('#signout').onclick = () => { store.del('token'); route(); };
+$('#signout').onclick = () => { store.del('token'); store.del('feed'); route(); };
 
 /* ---------- Lists ---------- */
 let listTracks = [];
@@ -306,6 +311,17 @@ function markPlaying() {
   document.querySelectorAll('.row[data-id]').forEach(r => {
     r.classList.toggle('is-playing', !!current && r.dataset.id === current.id);
   });
+}
+
+function showError(node, e) {
+  if (e.message === 'auth') {
+    const again = el('button', 'primary', 'Sign in again');
+    again.type = 'button';
+    again.onclick = signIn;
+    node.replaceChildren('Your session ended. Google sessions last about an hour.', again);
+  } else {
+    node.replaceChildren(e.message);
+  }
 }
 
 /* loader(pageToken) resolves to { items, next }.
@@ -362,14 +378,7 @@ function listView(mount, opts) {
       markPlaying();
     } catch (e) {
       status.hidden = false;
-      if (e.message === 'auth') {
-        const again = el('button', 'primary', 'Sign in again');
-        again.type = 'button';
-        again.onclick = signIn;
-        status.replaceChildren('Your session ended. Google sessions last about an hour.', again);
-      } else {
-        status.replaceChildren(e.message);
-      }
+      showError(status, e);
     }
     more.disabled = false;
   }
@@ -414,8 +423,99 @@ const myPlaylistsLoader = async pageToken => {
   return { items: items, next: j.nextPageToken };
 };
 
+/* ---------- New from subscriptions ---------- */
+const FEED_TTL = 30 * 60 * 1000;
+
+const ago = iso => {
+  const m = Math.max(1, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+  if (m < 60) return m + 'm ago';
+  if (m < 1440) return Math.floor(m / 60) + 'h ago';
+  if (m < 43200) return Math.floor(m / 1440) + 'd ago';
+  return Math.floor(m / 43200) + 'mo ago';
+};
+
+/* Latest uploads for one channel. UULF is the channel's long-form list (no Shorts);
+   UU is every upload, used when a channel has no long-form list. */
+async function latestFrom(ch) {
+  const get = prefix => api('playlistItems', {
+    part: 'snippet,contentDetails', maxResults: 5, playlistId: prefix + ch.channelId.slice(2)
+  });
+  let j;
+  try {
+    j = await get('UULF');
+  } catch (e) {
+    if (e.message === 'auth' || e.fatal) throw e;
+    try { j = await get('UU'); } catch (e2) {
+      if (e2.message === 'auth' || e2.fatal) throw e2;
+      return [];
+    }
+  }
+  return (j.items || [])
+    .filter(i => i.snippet && i.contentDetails && i.contentDetails.videoId &&
+                 i.snippet.title !== 'Private video' && i.snippet.title !== 'Deleted video')
+    .map(i => ({
+      id: i.contentDetails.videoId, title: i.snippet.title, by: ch.title,
+      at: i.contentDetails.videoPublishedAt || i.snippet.publishedAt
+    }));
+}
+
+async function buildFeed(onProgress) {
+  const subs = [];
+  let pageToken;
+  do {
+    const page = await subsLoader(pageToken);
+    subs.push(...page.items);
+    pageToken = page.next;
+  } while (pageToken);
+
+  const out = [];
+  let next = 0, done = 0;
+  const worker = async () => {
+    while (next < subs.length) {
+      const ch = subs[next++];
+      out.push(...await latestFrom(ch));
+      onProgress(++done, subs.length);
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  return out.slice(0, 150);
+}
+
 /* ---------- Tabs ---------- */
 const tabs = {
+  feed(main) {
+    const head = el('div', 'view-head');
+    const refresh = el('button', 'link', 'Refresh');
+    refresh.type = 'button';
+    head.append(el('h2', '', 'New from your channels'), refresh);
+    const body = el('div');
+    main.replaceChildren(head, body);
+
+    const render = items => listView(body, {
+      empty: 'No recent uploads from your channels.',
+      loader: async () => ({
+        items: items.map(t => ({ id: t.id, title: t.title, by: t.by, channel: t.by + ' · ' + ago(t.at) }))
+      })
+    });
+    const load = async () => {
+      refresh.disabled = true;
+      const note = el('div', 'note', 'Checking your channels…');
+      body.replaceChildren(note);
+      try {
+        const items = await buildFeed((d, n) => { note.textContent = 'Checking your channels… ' + d + ' of ' + n; });
+        store.set('feed', { at: Date.now(), items: items });
+        render(items);
+      } catch (e) {
+        showError(note, e);
+      }
+      refresh.disabled = false;
+    };
+    refresh.onclick = load;
+
+    const cached = store.get('feed', null);
+    if (cached && Date.now() - cached.at < FEED_TTL) render(cached.items); else load();
+  },
   search(main) {
     const form = el('form', 'search');
     const input = el('input', 'field');
@@ -464,7 +564,7 @@ const tabs = {
 };
 
 function openTab(name) {
-  if (!tabs[name]) name = 'search';
+  if (!tabs[name]) name = 'feed';
   store.set('tab', name);
   document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
   tabs[name]($('#main'));
@@ -537,7 +637,7 @@ function start() {
   markPlaying();
 
   const recent = store.get('recent', []).filter(t => t.id !== current.id);
-  recent.unshift({ id: current.id, title: current.title, channel: current.channel || '' });
+  recent.unshift({ id: current.id, title: current.title, channel: current.by || current.channel || '' });
   store.set('recent', recent.slice(0, 50));
 
   if (!playerReady) { pending = true; return; }
