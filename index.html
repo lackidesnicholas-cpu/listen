@@ -380,7 +380,10 @@ async function addDurations(rows) {
   rows.forEach(r => { r.base = r.sub.textContent; });
   const paint = () => rows.forEach(r => {
     const d = durs[r.item.id];
-    if (d) { r.sub.textContent = (r.base ? r.base + ' · ' : '') + d; r.sub.hidden = false; }
+    if (!d) return;
+    const p = pos[r.item.id];
+    r.sub.textContent = (r.base ? r.base + ' · ' : '') + d + (p ? ' · resume ' + fmt(p.t) : '');
+    r.sub.hidden = false;
   });
   paint();
   const need = Array.from(new Set(rows.map(r => r.item.id).filter(id => !durs[id])));
@@ -925,6 +928,63 @@ document.querySelectorAll('nav.tabs button').forEach(b => { b.onclick = () => op
 
 /* ---------- Player ---------- */
 let player = null, playerReady = false, pending = false;
+let heard = false, ticks = 0;
+
+/* ---------- Resume ---------- */
+const pos = store.get('pos', {});
+const resumeAt = id => (pos[id] ? pos[id].t : 0);
+
+/* Remembers the spot in the current video. Nothing is kept for the first few
+   seconds or the last few, so finished videos start over next time. */
+function savePos() {
+  if (!playerReady || !current || !heard) return;
+  const t = player.getCurrentTime() || 0, d = player.getDuration() || 0;
+  if (!d) return;
+  if (t < 15 || t > d - 20) delete pos[current.id];
+  else pos[current.id] = { t: Math.floor(t), d: Math.floor(d), at: Date.now() };
+  const ids = Object.keys(pos);
+  if (ids.length > 300) {
+    ids.sort((a, b) => pos[a].at - pos[b].at).slice(0, ids.length - 300).forEach(k => { delete pos[k]; });
+  }
+  store.set('pos', pos);
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) savePos(); });
+window.addEventListener('pagehide', savePos);
+
+/* If iOS blocks the automatic start, ask for one direct tap on the player. */
+function watchStart() {
+  clearTimeout(tapTimer);
+  const check = n => {
+    const s = player.getPlayerState();
+    if (s === -1 || s === 5) setNeedTap(true);
+    else if (s === 3 && n < 4) tapTimer = setTimeout(() => check(n + 1), 2000);
+  };
+  tapTimer = setTimeout(() => check(0), 2500);
+}
+
+function showNow() {
+  $('#bar').hidden = false;
+  $('#now-title').textContent = current.title;
+  $('#now-sub').textContent = current.channel || '';
+  const p = pos[current.id];
+  $('#seek').max = p ? p.d : 1;
+  $('#seek').value = p ? p.t : 0;
+  $('#t-cur').textContent = fmt(p ? p.t : 0);
+  $('#t-dur').textContent = p ? fmt(p.d) : '0:00';
+  markPlaying();
+}
+
+/* On opening the app, bring back the last video, paused at the saved spot. */
+function restoreLast() {
+  const last = store.get('last', null);
+  if (current || !last || !token()) return;
+  queue = [last];
+  qi = 0;
+  current = last;
+  heard = false;
+  showNow();
+  player.cueVideoById({ videoId: last.id, startSeconds: resumeAt(last.id) });
+}
 let queue = [], qi = -1, current = null, tapTimer = null, dragging = false;
 const SPEEDS = [1, 1.25, 1.5, 2];
 let speedIndex = 0;
@@ -941,16 +1001,19 @@ window.onYouTubeIframeAPIReady = () => {
     width: 200, height: 200,
     playerVars: { playsinline: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, iv_load_policy: 3 },
     events: {
-      onReady: () => { playerReady = true; if (pending) { pending = false; start(); } },
+      onReady: () => { playerReady = true; if (pending) { pending = false; start(); } else restoreLast(); },
       onStateChange: e => {
         if (e.data === 1) {
+          heard = true;
           setNeedTap(false);
           $('#toggle').textContent = 'Pause';
           player.setPlaybackRate(SPEEDS[speedIndex]);
         } else if (e.data === 2) {
           $('#toggle').textContent = 'Play';
+          savePos();
         } else if (e.data === 0) {
           $('#toggle').textContent = 'Play';
+          savePos();
           step(1);
         }
       },
@@ -978,36 +1041,26 @@ function step(dir) {
 }
 
 function start() {
+  if (!queue[qi]) return;
+  savePos();
   current = queue[qi];
-  if (!current) return;
-  $('#bar').hidden = false;
-  $('#now-title').textContent = current.title;
-  $('#now-sub').textContent = current.channel || '';
-  $('#seek').value = 0;
-  $('#t-cur').textContent = '0:00';
-  $('#t-dur').textContent = '0:00';
-  markPlaying();
+  heard = false;
+  showNow();
+  store.set('last', { id: current.id, title: current.title, by: current.by || '', channel: current.by || current.channel || '' });
 
   const recent = store.get('recent', []).filter(t => t.id !== current.id);
   recent.unshift({ id: current.id, title: current.title, channel: current.by || current.channel || '' });
   store.set('recent', recent.slice(0, 50));
 
   if (!playerReady) { pending = true; return; }
-  player.loadVideoById(current.id);
-
-  /* If iOS blocks the automatic start, ask for one direct tap on the player. */
-  clearTimeout(tapTimer);
-  const check = n => {
-    const s = player.getPlayerState();
-    if (s === -1 || s === 5) setNeedTap(true);
-    else if (s === 3 && n < 4) tapTimer = setTimeout(() => check(n + 1), 2000);
-  };
-  tapTimer = setTimeout(() => check(0), 2500);
+  player.loadVideoById({ videoId: current.id, startSeconds: resumeAt(current.id) });
+  watchStart();
 }
 
 $('#toggle').onclick = () => {
   if (!playerReady || !current) return;
-  if (player.getPlayerState() === 1) player.pauseVideo(); else player.playVideo();
+  if (player.getPlayerState() === 1) player.pauseVideo();
+  else { player.playVideo(); if (!heard) watchStart(); }
 };
 $('#prev').onclick = () => step(-1);
 $('#next').onclick = () => step(1);
@@ -1026,6 +1079,8 @@ $('#seek').addEventListener('change', () => {
 
 setInterval(() => {
   if (!playerReady || !current || !player.getCurrentTime) return;
+  if (++ticks % 10 === 0 && player.getPlayerState() === 1) savePos();
+  if (!heard) return;
   const d = player.getDuration() || 0, c = player.getCurrentTime() || 0;
   if (!dragging) {
     $('#seek').max = d || 1;
