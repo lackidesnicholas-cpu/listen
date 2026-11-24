@@ -97,6 +97,19 @@
     background: none; border: 1px solid var(--line); color: var(--muted);
   }
   .row-act.done { border-color: transparent; color: var(--accent); }
+  .row-acts { flex: none; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+  .row-act.open { border-color: var(--accent); color: var(--accent); }
+  .sumbox {
+    margin: 0 0 12px; padding: 12px 14px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--line); font-size: 14px; line-height: 1.5;
+  }
+  .sumbox h4 { margin: 12px 0 4px; font-size: 14px; }
+  .sumbox h4:first-child { margin-top: 0; }
+  .sumbox p { margin: 0 0 8px; }
+  .sumbox ul { margin: 0 0 8px; padding-left: 18px; }
+  .sumbox li { margin-bottom: 4px; }
+  .sumbox li.sub { margin-left: 16px; list-style: circle; }
+  .sumbox .muted { color: var(--muted); }
   .notice {
     margin-bottom: 8px; padding: 12px; border-radius: 10px;
     background: var(--panel); border: 1px solid var(--line); color: var(--muted); font-size: 14px;
@@ -460,6 +473,165 @@ const removeButton = (item, row) => actButton('Remove', 'Removed', async () => {
   row.hidden = true;
 });
 
+/* ---------- Summaries ---------- */
+/* The Gemini key is pasted into the app once and kept on this device only,
+   so it never sits in the public code on GitHub. */
+const GEMINI = 'https://generativelanguage.googleapis.com/v1beta/';
+const gemKey = () => store.get('gemKey', '');
+const sums = store.get('sums', {});
+const SUM_PROMPT = [
+  'Give a full breakdown of this video for someone deciding whether to listen to it.',
+  'Start with one sentence on what the video is about.',
+  'Then use short section headings that start with "## " and bullet points that start with "- ",',
+  'covering every main topic, argument or segment in the order it comes up, with timestamps like [12:34] where you can.',
+  'End with a "## Worth it if" section of one or two bullets.',
+  'Plain text only: no bold, no tables, no intro or sign-off.'
+].join(' ');
+
+/* Regular Flash models the key can reach, newest first, remembered for a week.
+   When one is busy, the next one is tried. */
+async function geminiModels() {
+  const saved = store.get('gemModels', null);
+  if (saved && Date.now() - saved.at < 7 * 86400000 && saved.list.length) return saved.list;
+  let list = [];
+  try {
+    const j = await fetch(GEMINI + 'models?pageSize=200&key=' + encodeURIComponent(gemKey())).then(r => r.json());
+    const ver = n => parseFloat((/gemini-(\d+(?:\.\d+)?)/.exec(n) || [])[1] || 0);
+    list = (j.models || [])
+      .filter(m => (m.supportedGenerationMethods || []).indexOf('generateContent') >= 0 && /^models\/gemini-[\d.]+-flash$/.test(m.name))
+      .map(m => m.name)
+      .sort((a, b) => ver(b) - ver(a));
+  } catch (e) {}
+  list.push('models/gemini-flash-latest');
+  store.set('gemModels', { list: list, at: Date.now() });
+  return list;
+}
+
+async function summarize(id, say) {
+  const key = gemKey();
+  if (!key) throw new Error('key');
+  const body = {
+    contents: [{ parts: [
+      { file_data: { file_uri: 'https://www.youtube.com/watch?v=' + id } },
+      { text: SUM_PROMPT }
+    ] }],
+    generationConfig: { mediaResolution: 'MEDIA_RESOLUTION_LOW' }
+  };
+  const call = (model, b) => fetch(GEMINI + model + ':generateContent?key=' + encodeURIComponent(key), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b)
+  });
+  let last = 'The summary could not be made.', limited = false;
+  const models = await geminiModels();
+  for (let n = 0; n < models.length && n < 4; n++) {
+    let r = await call(models[n], body);
+    if (r.status === 400) {
+      /* Some models do not take the low-resolution setting; try once without it. */
+      const plain = { contents: body.contents };
+      r = await call(models[n], plain);
+    }
+    const j = await r.json().catch(() => ({}));
+    const msg = (j.error && j.error.message) || '';
+    if (/API key not valid|API_KEY_INVALID|invalid authentication|unregistered callers/i.test(msg) || r.status === 401) {
+      store.del('gemKey');
+      throw new Error('key');
+    }
+    if (r.ok) {
+      const cand = (j.candidates || [])[0];
+      const text = cand && cand.content && (cand.content.parts || []).map(x => x.text || '').join('').trim();
+      if (!text) throw new Error('No summary came back for this one. It may be private, unlisted or too new.');
+      sums[id] = { text: text, at: Date.now() };
+      const ids = Object.keys(sums);
+      if (ids.length > 100) ids.sort((a, b) => sums[a].at - sums[b].at).slice(0, ids.length - 100).forEach(k => { delete sums[k]; });
+      store.set('sums', sums);
+      return text;
+    }
+    if (r.status === 429) limited = true;
+    last = msg || last;
+    /* Busy, retired or rate-limited model: try the next one. Anything else is final. */
+    if ([429, 404, 500, 503].indexOf(r.status) < 0) break;
+    if (say) say('Gemini is busy, trying another model…');
+    if (models[n + 1]) store.set('gemModels', { list: models.slice(n + 1).concat(models.slice(0, n + 1)), at: Date.now() });
+  }
+  if (limited) throw new Error('The free daily limit for summaries is used up. It resets tomorrow.');
+  throw new Error(last);
+}
+
+/* Turns the plain-text breakdown into headings, bullets and paragraphs. */
+function renderSummary(box, text) {
+  box.replaceChildren();
+  let list = null;
+  text.split('\n').forEach(raw => {
+    const line = raw.replace(/\*\*/g, '').replace(/\s+$/, '');
+    if (!line.trim()) { list = null; return; }
+    const head = /^\s*#{1,6}\s+(.*)$/.exec(line);
+    const bullet = /^(\s*)[-*•]\s+(.*)$/.exec(line);
+    if (head) { list = null; box.append(el('h4', '', head[1])); }
+    else if (bullet) {
+      if (!list) { list = el('ul'); box.append(list); }
+      list.append(el('li', bullet[1].length >= 2 ? 'sub' : '', bullet[2]));
+    } else { list = null; box.append(el('p', '', line.trim())); }
+  });
+}
+
+/* One-time setup: paste the Gemini key, which stays on this phone. */
+function askKey(box, then) {
+  const input = el('input', 'field');
+  input.type = 'text';
+  input.placeholder = 'Paste your Gemini key';
+  input.autocapitalize = 'off';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  const save = el('button', 'primary', 'Save key');
+  save.type = 'button';
+  const link = el('a', '', 'aistudio.google.com/api-keys');
+  link.href = 'https://aistudio.google.com/api-keys';
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.style.color = 'var(--accent)';
+  const how = el('p', 'muted');
+  how.append('One-time setup. Open ', link, ', tap the "Listen summaries" key, copy it, and paste it here. It stays on this phone only.');
+  box.replaceChildren(how, input, save);
+  save.onclick = () => {
+    const v = input.value.trim();
+    if (v.length < 20) { input.focus(); return; }
+    store.set('gemKey', v);
+    then();
+  };
+}
+
+function summaryButton(item, row) {
+  const b = el('button', 'row-act', 'Summary');
+  b.type = 'button';
+  b.onclick = () => {
+    const open = row.nextElementSibling && row.nextElementSibling.classList.contains('sumbox') ? row.nextElementSibling : null;
+    if (open) { open.remove(); b.classList.remove('open'); return; }
+    const box = el('div', 'sumbox');
+    row.after(box);
+    b.classList.add('open');
+    if (sums[item.id]) return renderSummary(box, sums[item.id].text);
+    const run = async () => {
+      if (!gemKey()) return askKey(box, run);
+      const note = el('p', 'muted', 'Summarizing…');
+      box.replaceChildren(note);
+      const t0 = Date.now();
+      let extra = '';
+      const tick = setInterval(() => {
+        note.textContent = (extra || 'Summarizing…') + ' ' + Math.round((Date.now() - t0) / 1000) + 's';
+      }, 1000);
+      try {
+        const text = await summarize(item.id, t => { extra = t; });
+        if (box.isConnected) renderSummary(box, text);
+      } catch (e) {
+        if (e.message === 'key') askKey(box, run);
+        else note.textContent = e.message;
+      }
+      clearInterval(tick);
+    };
+    run();
+  };
+  return b;
+}
+
 function showError(node, e) {
   if (e.message === 'auth') {
     const again = el('button', 'primary', 'Sign in again');
@@ -533,7 +705,9 @@ function listView(mount, opts) {
           const i = tracks.push(item) - 1;
           row.dataset.id = item.id;
           main.onclick = () => playFrom(tracks, i);
-          row.append(opts.action ? opts.action(item, row) : laterButton(item));
+          const acts = el('div', 'row-acts');
+          acts.append(opts.action ? opts.action(item, row) : laterButton(item), summaryButton(item, row));
+          row.append(acts);
           added.push({ item: item, sub: sub });
         }
         list.append(row);
