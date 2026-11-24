@@ -33,7 +33,7 @@
   .wrap { max-width: 640px; margin: 0 auto; padding: 0 16px; }
 
   /* Setup and sign-in screens */
-  .screen { padding-top: calc(48px + env(safe-area-inset-top)); padding-bottom: 48px; }
+  .screen { padding-top: 48px; padding-bottom: 48px; }
   .screen h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: -0.02em; }
   .screen p { color: var(--muted); margin: 0 0 16px; }
   .screen ol { color: var(--muted); padding-left: 20px; margin: 0 0 20px; }
@@ -61,11 +61,11 @@
   }
   header.top strong { font-size: 20px; letter-spacing: -0.02em; }
   .link { background: none; border: 0; padding: 6px 0; color: var(--muted); font-size: 14px; }
-  /* Tabs live in a bar along the bottom of the screen. */
+  /* The player and the tabs stay pinned together at the top while you scroll. */
+  #top { position: sticky; top: 0; z-index: 10; padding-top: env(safe-area-inset-top); background: var(--panel); }
   nav.tabs {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: flex; gap: 2px;
-    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
-    background: var(--panel); border-top: 1px solid var(--line);
+    display: flex; gap: 2px; padding: 6px 8px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
   }
   nav.tabs button {
     flex: 1; min-width: 0; padding: 10px 2px; border-radius: 10px; font-size: 12px;
@@ -73,9 +73,7 @@
   }
   nav.tabs button.on { background: var(--line); color: var(--text); font-weight: 600; }
 
-  main { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
-  #app { padding-top: env(safe-area-inset-top); }
-  #bar:not([hidden]) ~ #app { padding-top: 0; }
+  main { padding-bottom: calc(32px + env(safe-area-inset-bottom)); }
   .search { display: flex; gap: 8px; margin-bottom: 8px; }
   .search .field { flex: 1; }
   .search button {
@@ -112,11 +110,11 @@
     border: 1px solid var(--line); background: transparent; color: var(--muted);
   }
 
-  /* Player bar, pinned to the top while you scroll. */
+  /* Player bar */
   #bar {
-    position: sticky; top: 0; z-index: 10; overflow: hidden;
+    position: relative; overflow: hidden;
     background: var(--panel); border-bottom: 1px solid var(--line);
-    padding: calc(10px + env(safe-area-inset-top)) 0 10px;
+    padding: 10px 0;
   }
   #now-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #now-sub { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -132,22 +130,9 @@
     border-radius: 999px; min-width: 84px;
   }
 
-  /* The YouTube player lives inside the bar, invisible. It only accepts taps
-     when iOS refuses to start audio without a direct touch on the player. */
+  /* The YouTube player lives inside the bar, invisible. */
   #ytwrap { position: absolute; inset: 0; opacity: 0.01; pointer-events: none; z-index: 0; }
   #ytwrap iframe { width: 100%; height: 100%; border: 0; }
-  #tap {
-    position: absolute; inset: 0; z-index: 4; background: var(--accent); color: var(--accent-ink);
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    text-align: center; padding: 16px;
-  }
-  #tap b { font-size: 18px; }
-  #tap span { font-size: 13px; opacity: 0.8; margin-top: 4px; }
-  #bar.needtap #ytwrap { pointer-events: auto; z-index: 5; }
-  #tap-dismiss {
-    position: absolute; top: calc(6px + env(safe-area-inset-top)); right: 10px; z-index: 6;
-    background: none; border: 0; color: var(--accent-ink); font-size: 13px; padding: 8px;
-  }
   .bar-inner { position: relative; z-index: 1; }
 </style>
 </head>
@@ -175,14 +160,10 @@
   <button id="reset-btn" class="link" type="button" style="margin-top:16px">Change client ID</button>
 </section>
 
+<div id="top">
 <!-- Player -->
 <div id="bar" hidden>
   <div id="ytwrap"><div id="yt"></div></div>
-  <div id="tap" hidden>
-    <b>Tap here to start the audio</b>
-    <span>iPhone sometimes needs one direct tap before sound can play.</span>
-  </div>
-  <button id="tap-dismiss" type="button" hidden>Dismiss</button>
   <div class="wrap bar-inner">
     <div id="now-title"></div>
     <div id="now-sub"></div>
@@ -199,6 +180,16 @@
   </div>
 </div>
 
+<nav class="tabs" hidden>
+  <button type="button" data-tab="feed">New</button>
+  <button type="button" data-tab="search">Search</button>
+  <button type="button" data-tab="subs">Channels</button>
+  <button type="button" data-tab="playlists">Playlists</button>
+  <button type="button" data-tab="later">Later</button>
+  <button type="button" data-tab="recent">Recent</button>
+</nav>
+</div>
+
 <!-- App -->
 <section id="app" hidden>
   <div class="wrap">
@@ -209,14 +200,6 @@
         <button id="signout" class="link" type="button">Sign out</button>
       </span>
     </header>
-    <nav class="tabs">
-      <button type="button" data-tab="feed">New</button>
-      <button type="button" data-tab="search">Search</button>
-      <button type="button" data-tab="subs">Channels</button>
-      <button type="button" data-tab="playlists">Playlists</button>
-      <button type="button" data-tab="later">Later</button>
-      <button type="button" data-tab="recent">Recent</button>
-    </nav>
     <main id="main"></main>
   </div>
 </section>
@@ -322,6 +305,7 @@ async function api(path, params, opts) {
 /* ---------- Screens ---------- */
 function show(name, msg) {
   ['setup', 'signin', 'app'].forEach(id => { $('#' + id).hidden = id !== name; });
+  $('nav.tabs').hidden = name !== 'app';
   if (name === 'signin') {
     $('#signin-msg').hidden = !msg;
     $('#signin-msg').textContent = msg || '';
@@ -829,17 +813,6 @@ function savePos() {
 document.addEventListener('visibilitychange', () => { if (document.hidden) savePos(); });
 window.addEventListener('pagehide', savePos);
 
-/* If iOS blocks the automatic start, ask for one direct tap on the player. */
-function watchStart() {
-  clearTimeout(tapTimer);
-  const check = n => {
-    const s = player.getPlayerState();
-    if (s === -1 || s === 5) setNeedTap(true);
-    else if (s === 3 && n < 4) tapTimer = setTimeout(() => check(n + 1), 2000);
-  };
-  tapTimer = setTimeout(() => check(0), 2500);
-}
-
 function showNow() {
   $('#bar').hidden = false;
   $('#now-title').textContent = current.title;
@@ -863,16 +836,9 @@ function restoreLast() {
   showNow();
   player.cueVideoById({ videoId: last.id, startSeconds: resumeAt(last.id) });
 }
-let queue = [], qi = -1, current = null, tapTimer = null, dragging = false;
+let queue = [], qi = -1, current = null, dragging = false;
 const SPEEDS = [1, 1.25, 1.5, 2];
 let speedIndex = 0;
-
-function setNeedTap(on) {
-  $('#bar').classList.toggle('needtap', on);
-  $('#tap').hidden = !on;
-  $('#tap-dismiss').hidden = !on;
-}
-$('#tap-dismiss').onclick = () => setNeedTap(false);
 
 window.onYouTubeIframeAPIReady = () => {
   player = new YT.Player('yt', {
@@ -883,7 +849,6 @@ window.onYouTubeIframeAPIReady = () => {
       onStateChange: e => {
         if (e.data === 1) {
           heard = true;
-          setNeedTap(false);
           $('#toggle').textContent = 'Pause';
           player.setPlaybackRate(SPEEDS[speedIndex]);
         } else if (e.data === 2) {
@@ -896,8 +861,6 @@ window.onYouTubeIframeAPIReady = () => {
         }
       },
       onError: () => {
-        clearTimeout(tapTimer);
-        setNeedTap(false);
         $('#now-sub').textContent = 'This one cannot be played outside YouTube.';
         if (qi < queue.length - 1) setTimeout(() => step(1), 1500);
       }
@@ -932,13 +895,12 @@ function start() {
 
   if (!playerReady) { pending = true; return; }
   player.loadVideoById({ videoId: current.id, startSeconds: resumeAt(current.id) });
-  watchStart();
 }
 
 $('#toggle').onclick = () => {
   if (!playerReady || !current) return;
   if (player.getPlayerState() === 1) player.pauseVideo();
-  else { player.playVideo(); if (!heard) watchStart(); }
+  else player.playVideo();
 };
 $('#prev').onclick = () => step(-1);
 $('#next').onclick = () => step(1);
